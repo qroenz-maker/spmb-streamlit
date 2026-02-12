@@ -83,12 +83,20 @@ def login(username, password):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT username, role, npsn FROM users WHERE username=%s AND password=%s",
+        """
+        SELECT role, npsn
+        FROM users
+        WHERE username = %s AND password = %s
+        """,
         (username, password)
     )
-    user = cur.fetchone()
+    row = cur.fetchone()
     conn.close()
-    return user
+
+    if row is None:
+        return None, None
+
+    return row[0], row[1]
 
 # =========================
 # LOCK (ANTRIAN UPLOAD)
@@ -161,6 +169,11 @@ if not st.session_state.login:
     p = st.text_input("Password", type="password")
     if st.button("Login"):
         role, npsn = login(u, p)
+
+if role is None:
+    st.error("Username atau password salah")
+    st.stop()
+
         if role:
             st.session_state.login = True
             st.session_state.role = role

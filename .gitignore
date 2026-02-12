@@ -2,3 +2,4 @@ database.db
 locks/
 __pycache__/
 *.pyc
+.streamlit/

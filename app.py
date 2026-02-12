@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import hashlib
-import os
 from supabase import create_client
 
 # =========================
@@ -9,18 +8,20 @@ from supabase import create_client
 # =========================
 st.set_page_config(page_title="SPMB Terpusat", layout="wide")
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    st.error("Supabase credentials belum diset di Streamlit Secrets.")
+# =========================
+# SUPABASE CONNECTION (STREAMLIT SECRETS)
+# =========================
+try:
+    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+except Exception:
+    st.error("Supabase credentials belum diisi di Streamlit Secrets.")
     st.stop()
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-
 # =========================
-# HASH
+# HASH PASSWORD
 # =========================
 def hash_pw(pw):
     return hashlib.sha256(pw.encode()).hexdigest()
@@ -30,6 +31,7 @@ def hash_pw(pw):
 # =========================
 def login(username, password):
     hpw = hash_pw(password)
+
     res = supabase.table("users") \
         .select("*") \
         .eq("username", username) \
@@ -38,6 +40,7 @@ def login(username, password):
 
     if not res.data:
         return None
+
     return res.data[0]
 
 # =========================
@@ -54,11 +57,11 @@ if not st.session_state.login:
 
     st.title("🔐 Login SPMB Terpusat")
 
-    u = st.text_input("Username")
-    p = st.text_input("Password", type="password")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
 
     if st.button("Login"):
-        user = login(u, p)
+        user = login(username, password)
 
         if not user:
             st.error("Username atau password salah")
@@ -88,10 +91,16 @@ if role == "OPERATOR":
 
     npsn = st.session_state.user["npsn"]
 
-    sekolah = supabase.table("schools") \
+    sekolah_data = supabase.table("schools") \
         .select("*") \
         .eq("npsn", npsn) \
-        .execute().data[0]
+        .execute().data
+
+    if not sekolah_data:
+        st.error("Sekolah tidak ditemukan di tabel schools.")
+        st.stop()
+
+    sekolah = sekolah_data[0]
 
     st.title("🏫 Dashboard Sekolah")
     st.subheader(sekolah["nama_sekolah"])
@@ -114,12 +123,13 @@ if role == "OPERATOR":
         df_upload = pd.read_excel(file)
 
         for _, row in df_upload.iterrows():
+            nik = str(row["NIK"])
 
-            if len(str(row["NIK"])) != 16:
+            if len(nik) != 16:
                 continue
 
             supabase.table("spmb").upsert({
-                "nik": str(row["NIK"]),
+                "nik": nik,
                 "nama": row["NAMA"],
                 "npsn_asal": row["NPSN_ASAL"],
                 "npsn_tujuan": npsn
@@ -155,7 +165,7 @@ if role == "DINAS":
             df.set_index("nama_sekolah")["total_siswa"]
         )
 
-    # DETAIL
+    # DETAIL NASIONAL
     st.markdown("### Detail Nasional")
     all_data = supabase.table("spmb").select("*").execute().data
     st.dataframe(pd.DataFrame(all_data))

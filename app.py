@@ -74,16 +74,17 @@ conn.commit()
 # AUTH
 # =========================
 def login(username, password):
-    response = supabase.table("users") \
-        .select("role,npsn") \
-        .eq("username", username) \
-        .eq("password", password) \
-        .execute()
+    hpw = hash_pw(password)
+    c.execute(
+        "SELECT role, npsn FROM users WHERE username=? AND password=?",
+        (username, hpw)
+    )
+    row = c.fetchone()
 
-    if not response.data:
+    if row is None:
         return None, None
 
-    return response.data[0]["role"], response.data[0]["npsn"]
+    return row[0], row[1]
 
 # =========================
 # LOCK (ANTRIAN)

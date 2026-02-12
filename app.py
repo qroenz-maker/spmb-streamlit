@@ -4,6 +4,8 @@ import sqlite3
 import hashlib
 import os
 import time
+import psycopg2
+
 from datetime import datetime
 
 # =========================
@@ -13,6 +15,16 @@ DB = "database.db"
 LOCK_DIR = "locks"
 
 os.makedirs(LOCK_DIR, exist_ok=True)
+
+def get_conn():
+    return psycopg2.connect(
+        host=st.secrets["DB_HOST"],
+        database=st.secrets["DB_NAME"],
+        user=st.secrets["DB_USER"],
+        password=st.secrets["DB_PASSWORD"],
+        port=st.secrets["DB_PORT"]
+    )
+
 
 # =========================
 # DATABASE
@@ -67,11 +79,15 @@ conn.commit()
 # AUTH
 # =========================
 def login(username, password):
-    c.execute("SELECT role, npsn, password FROM users WHERE username=?", (username,))
-    r = c.fetchone()
-    if r and r[2] == hash_pw(password):
-        return r[0], r[1]
-    return None, None
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT username, role, npsn FROM users WHERE username=%s AND password=%s",
+        (username, password)
+    )
+    user = cur.fetchone()
+    conn.close()
+    return user
 
 # =========================
 # LOCK (ANTRIAN UPLOAD)

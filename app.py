@@ -4,7 +4,6 @@ import sqlite3
 import hashlib
 import os
 import time
-import psycopg2
 
 from datetime import datetime
 
@@ -16,19 +15,8 @@ LOCK_DIR = "locks"
 
 os.makedirs(LOCK_DIR, exist_ok=True)
 
-def get_conn():
-    return psycopg2.connect(
-        host=st.secrets["DB_HOST"],
-        database=st.secrets["DB_NAME"],
-        user=st.secrets["DB_USER"],
-        password=st.secrets["DB_PASSWORD"],
-        port=st.secrets["DB_PORT"],
-        sslmode="require"
-    )
-
-
 # =========================
-# DATABASE
+# DATABASE (SQLite)
 # =========================
 conn = sqlite3.connect(DB, check_same_thread=False)
 c = conn.cursor()
@@ -70,28 +58,28 @@ conn.commit()
 def hash_pw(pw):
     return hashlib.sha256(pw.encode()).hexdigest()
 
-c.execute("INSERT OR IGNORE INTO users VALUES (?,?,?,?)",
-          ("dinas", hash_pw("dinas123"), "DINAS", None))
-c.execute("INSERT OR IGNORE INTO users VALUES (?,?,?,?)",
-          ("operator1", hash_pw("operator123"), "OPERATOR", "12345678"))
+c.execute(
+    "INSERT OR IGNORE INTO users VALUES (?,?,?,?)",
+    ("dinas", hash_pw("dinas123"), "DINAS", None)
+)
+
+c.execute(
+    "INSERT OR IGNORE INTO users VALUES (?,?,?,?)",
+    ("operator1", hash_pw("operator123"), "OPERATOR", "12345678")
+)
+
 conn.commit()
 
 # =========================
 # AUTH
 # =========================
 def login(username, password):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT role, npsn
-        FROM users
-        WHERE username = %s AND password = %s
-        """,
-        (username, password)
+    hpw = hash_pw(password)
+    c.execute(
+        "SELECT role, npsn FROM users WHERE username=? AND password=?",
+        (username, hpw)
     )
-    row = cur.fetchone()
-    conn.close()
+    row = c.fetchone()
 
     if row is None:
         return None, None
@@ -99,7 +87,7 @@ def login(username, password):
     return row[0], row[1]
 
 # =========================
-# LOCK (ANTRIAN UPLOAD)
+# LOCK (ANTRIAN)
 # =========================
 def acquire_lock(npsn):
     lockfile = f"{LOCK_DIR}/{npsn}.lock"
@@ -114,7 +102,7 @@ def release_lock(npsn):
         os.remove(lockfile)
 
 # =========================
-# VALIDASI & PROSES
+# PROSES EXCEL
 # =========================
 def process_excel(df, npsn_operator):
     sukses = 0
@@ -152,36 +140,37 @@ def process_excel(df, npsn_operator):
             "INSERT INTO conflicts VALUES (?,?,?,?,?,?)",
             (datetime.now(), npsn_operator, *k)
         )
-    conn.commit()
 
+    conn.commit()
     return sukses, konflik
 
 # =========================
-# UI
+# UI LOGIN
 # =========================
 st.title("📊 Sistem Upload SPMB Terpusat")
 
 if "login" not in st.session_state:
     st.session_state.login = False
+    st.session_state.role = None
+    st.session_state.npsn = None
 
 if not st.session_state.login:
     u = st.text_input("Username")
     p = st.text_input("Password", type="password")
+
     if st.button("Login"):
         role, npsn = login(u, p)
 
-if role is None:
-    st.error("Username atau password salah")
-    st.stop()
+        if role is None:
+            st.error("❌ Username atau password salah")
+            st.stop()
 
-        if role:
-            st.session_state.login = True
-            st.session_state.role = role
-            st.session_state.npsn = npsn
-            st.success("Login berhasil")
-            st.rerun()
-        else:
-            st.error("Login gagal")
+        st.session_state.login = True
+        st.session_state.role = role
+        st.session_state.npsn = npsn
+        st.success("✅ Login berhasil")
+        st.rerun()
+
     st.stop()
 
 # =========================
@@ -194,7 +183,7 @@ if st.session_state.role == "OPERATOR":
 
     if file:
         if not acquire_lock(st.session_state.npsn):
-            st.warning("⏳ Upload sedang diproses, menunggu antrian...")
+            st.warning("⏳ Sedang diproses operator lain")
             st.stop()
 
         try:
@@ -210,7 +199,7 @@ if st.session_state.role == "OPERATOR":
             release_lock(st.session_state.npsn)
             st.stop()
 
-        with st.spinner("Memproses & validasi data..."):
+        with st.spinner("Memproses data..."):
             sukses, konflik = process_excel(df, st.session_state.npsn)
             time.sleep(1)
 
@@ -231,6 +220,7 @@ if st.session_state.role == "OPERATOR":
         conn,
         params=(st.session_state.npsn,)
     )
+
     st.download_button(
         "Download CSV",
         df.to_csv(index=False),
@@ -246,6 +236,7 @@ if st.session_state.role == "DINAS":
     st.markdown("### 📊 Rekap Nasional")
     df = pd.read_sql("SELECT * FROM spmb", conn)
     st.dataframe(df)
+
     st.download_button(
         "Download Rekap Nasional",
         df.to_csv(index=False),

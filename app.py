@@ -1,197 +1,248 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
 import hashlib
-from supabase import create_client
+import os
+import time
+
+from datetime import datetime
 
 # =========================
-# CONFIG
+# KONFIGURASI
 # =========================
-st.set_page_config(page_title="SPMB Terpusat", layout="wide")
+DB = "database.db"
+LOCK_DIR = "locks"
+
+os.makedirs(LOCK_DIR, exist_ok=True)
 
 # =========================
-# SUPABASE CONNECTION (STREAMLIT SECRETS)
+# DATABASE (SQLite)
 # =========================
-try:
-    SUPABASE_URL = st.secrets["SUPABASE_URL"]
-    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-except Exception:
-    st.error("Supabase credentials belum diisi di Streamlit Secrets.")
-    st.stop()
+conn = sqlite3.connect(DB, check_same_thread=False)
+c = conn.cursor()
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+c.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    username TEXT PRIMARY KEY,
+    password TEXT,
+    role TEXT,
+    npsn TEXT
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS spmb (
+    nik TEXT UNIQUE,
+    nama TEXT,
+    npsn_asal TEXT,
+    npsn_tujuan TEXT
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS conflicts (
+    waktu TEXT,
+    npsn_operator TEXT,
+    row_no INTEGER,
+    kolom TEXT,
+    nilai TEXT,
+    alasan TEXT
+)
+""")
+
+conn.commit()
 
 # =========================
-# HASH PASSWORD
+# USER DEFAULT
 # =========================
 def hash_pw(pw):
     return hashlib.sha256(pw.encode()).hexdigest()
 
+c.execute(
+    "INSERT OR IGNORE INTO users VALUES (?,?,?,?)",
+    ("dinas", hash_pw("dinas123"), "DINAS", None)
+)
+
+c.execute(
+    "INSERT OR IGNORE INTO users VALUES (?,?,?,?)",
+    ("operator1", hash_pw("operator123"), "OPERATOR", "12345678")
+)
+
+conn.commit()
+
 # =========================
-# LOGIN FUNCTION
+# AUTH
 # =========================
 def login(username, password):
     hpw = hash_pw(password)
+    c.execute(
+        "SELECT role, npsn FROM users WHERE username=? AND password=?",
+        (username, hpw)
+    )
+    row = c.fetchone()
 
-    res = supabase.table("users") \
-        .select("*") \
-        .eq("username", username) \
-        .eq("password", hpw) \
-        .execute()
+    if row is None:
+        return None, None
 
-    if not res.data:
-        return None
-
-    return res.data[0]
+    return row[0], row[1]
 
 # =========================
-# SESSION INIT
+# LOCK (ANTRIAN)
 # =========================
+def acquire_lock(npsn):
+    lockfile = f"{LOCK_DIR}/{npsn}.lock"
+    if os.path.exists(lockfile):
+        return False
+    open(lockfile, "w").close()
+    return True
+
+def release_lock(npsn):
+    lockfile = f"{LOCK_DIR}/{npsn}.lock"
+    if os.path.exists(lockfile):
+        os.remove(lockfile)
+
+# =========================
+# PROSES EXCEL
+# =========================
+def process_excel(df, npsn_operator):
+    sukses = 0
+    konflik = []
+
+    for i, row in df.iterrows():
+        row_no = i + 2
+
+        nik = str(row["NIK"]).strip()
+        nama = str(row["NAMA"]).strip()
+        npsn_asal = str(row["NPSN_ASAL"]).strip()
+        npsn_tujuan = str(row["NPSN_TUJUAN"]).strip()
+
+        if len(nik) != 16 or not nik.isdigit():
+            konflik.append((row_no, "NIK", nik, "NIK harus 16 digit"))
+            continue
+
+        if npsn_tujuan != npsn_operator:
+            konflik.append((row_no, "NPSN_TUJUAN", npsn_tujuan, "Tidak sesuai akun operator"))
+            continue
+
+        try:
+            c.execute(
+                "INSERT INTO spmb VALUES (?,?,?,?)",
+                (nik, nama, npsn_asal, npsn_tujuan)
+            )
+            sukses += 1
+        except sqlite3.IntegrityError:
+            konflik.append((row_no, "NIK", nik, "NIK duplikat nasional"))
+
+    conn.commit()
+
+    for k in konflik:
+        c.execute(
+            "INSERT INTO conflicts VALUES (?,?,?,?,?,?)",
+            (datetime.now(), npsn_operator, *k)
+        )
+
+    conn.commit()
+    return sukses, konflik
+
+# =========================
+# UI LOGIN
+# =========================
+st.title("📊 Sistem Upload SPMB Terpusat")
+
 if "login" not in st.session_state:
     st.session_state.login = False
-    st.session_state.user = None
+    st.session_state.role = None
+    st.session_state.npsn = None
 
-# =========================
-# LOGIN PAGE
-# =========================
 if not st.session_state.login:
-
-    st.title("🔐 Login SPMB Terpusat")
-
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+    u = st.text_input("Username")
+    p = st.text_input("Password", type="password")
 
     if st.button("Login"):
-        user = login(username, password)
+        role, npsn = login(u, p)
 
-        if not user:
-            st.error("Username atau password salah")
+        if role is None:
+            st.error("❌ Username atau password salah")
             st.stop()
 
         st.session_state.login = True
-        st.session_state.user = user
+        st.session_state.role = role
+        st.session_state.npsn = npsn
+        st.success("✅ Login berhasil")
         st.rerun()
 
     st.stop()
 
 # =========================
-# LOGOUT
+# OPERATOR
 # =========================
-col1, col2 = st.columns([8,2])
-with col2:
-    if st.button("Logout"):
-        st.session_state.clear()
-        st.rerun()
+if st.session_state.role == "OPERATOR":
+    st.subheader(f"🏫 Operator Sekolah (NPSN {st.session_state.npsn})")
 
-role = st.session_state.user["role"]
-
-# =========================
-# DASHBOARD OPERATOR
-# =========================
-if role == "OPERATOR":
-
-    npsn = st.session_state.user["npsn"]
-
-    sekolah_data = supabase.table("schools") \
-        .select("*") \
-        .eq("npsn", npsn) \
-        .execute().data
-
-    if not sekolah_data:
-        st.error("Sekolah tidak ditemukan di tabel schools.")
-        st.stop()
-
-    sekolah = sekolah_data[0]
-
-    st.title("🏫 Dashboard Sekolah")
-    st.subheader(sekolah["nama_sekolah"])
-
-    data = supabase.table("spmb") \
-        .select("*") \
-        .eq("npsn_tujuan", npsn) \
-        .execute().data
-
-    df = pd.DataFrame(data)
-
-    st.metric("Total Siswa", len(df))
-    st.dataframe(df)
-
-    st.markdown("### Upload Excel")
-
-    file = st.file_uploader("Upload File Excel", type=["xlsx"])
+    file = st.file_uploader("Upload Excel SPMB", type=["xlsx"])
 
     if file:
-        df_upload = pd.read_excel(file)
+        if not acquire_lock(st.session_state.npsn):
+            st.warning("⏳ Sedang diproses operator lain")
+            st.stop()
 
-        for _, row in df_upload.iterrows():
-            nik = str(row["NIK"])
+        try:
+            df = pd.read_excel(file, sheet_name="hasil_spmb")
+        except:
+            st.error("❌ Sheet harus bernama: hasil_spmb")
+            release_lock(st.session_state.npsn)
+            st.stop()
 
-            if len(nik) != 16:
-                continue
+        wajib = ["NIK", "NAMA", "NPSN_ASAL", "NPSN_TUJUAN"]
+        if list(df.columns) != wajib:
+            st.error("❌ Header tidak sesuai template")
+            release_lock(st.session_state.npsn)
+            st.stop()
 
-            supabase.table("spmb").upsert({
-                "nik": nik,
-                "nama": row["NAMA"],
-                "npsn_asal": row["NPSN_ASAL"],
-                "npsn_tujuan": npsn
-            }).execute()
+        with st.spinner("Memproses data..."):
+            sukses, konflik = process_excel(df, st.session_state.npsn)
+            time.sleep(1)
 
-        st.success("Upload berhasil")
-        st.rerun()
+        release_lock(st.session_state.npsn)
+
+        st.success(f"✅ Data masuk: {sukses}")
+        st.error(f"❌ Konflik: {len(konflik)}")
+
+        if konflik:
+            st.dataframe(pd.DataFrame(
+                konflik,
+                columns=["Baris", "Kolom", "Nilai", "Alasan"]
+            ))
+
+    st.markdown("### ⬇ Download Data Sekolah")
+    df = pd.read_sql(
+        "SELECT * FROM spmb WHERE npsn_tujuan=?",
+        conn,
+        params=(st.session_state.npsn,)
+    )
+
+    st.download_button(
+        "Download CSV",
+        df.to_csv(index=False),
+        "spmb_sekolah.csv"
+    )
 
 # =========================
-# DASHBOARD DINAS
+# DINAS
 # =========================
-if role == "DINAS":
+if st.session_state.role == "DINAS":
+    st.subheader("🏛 Super Admin (Dinas)")
 
-    st.title("🏛 Dashboard Dinas")
+    st.markdown("### 📊 Rekap Nasional")
+    df = pd.read_sql("SELECT * FROM spmb", conn)
+    st.dataframe(df)
 
-    # REKAP
-    data = supabase.rpc("rekap_sekolah").execute().data
-    df = pd.DataFrame(data)
+    st.download_button(
+        "Download Rekap Nasional",
+        df.to_csv(index=False),
+        "rekap_spmb_nasional.csv"
+    )
 
-    if not df.empty:
-
-        filter_sekolah = st.selectbox(
-            "Filter Sekolah",
-            ["Semua"] + df["nama_sekolah"].tolist()
-        )
-
-        if filter_sekolah != "Semua":
-            df = df[df["nama_sekolah"] == filter_sekolah]
-
-        st.dataframe(df)
-
-        st.bar_chart(
-            df.set_index("nama_sekolah")["total_siswa"]
-        )
-
-    # DETAIL NASIONAL
-    st.markdown("### Detail Nasional")
-    all_data = supabase.table("spmb").select("*").execute().data
-    st.dataframe(pd.DataFrame(all_data))
-
-    # =========================
-    # MANAJEMEN USER
-    # =========================
-    st.markdown("### 👥 Manajemen User")
-
-    users = supabase.table("users").select("username,role,npsn").execute().data
-    st.dataframe(pd.DataFrame(users))
-
-    with st.form("add_user"):
-        u = st.text_input("Username")
-        p = st.text_input("Password")
-        role_new = st.selectbox("Role", ["OPERATOR","DINAS"])
-        npsn_new = st.text_input("NPSN (isi jika OPERATOR)")
-        submit = st.form_submit_button("Tambah User")
-
-        if submit:
-            supabase.table("users").insert({
-                "username": u,
-                "password": hash_pw(p),
-                "role": role_new,
-                "npsn": npsn_new if role_new=="OPERATOR" else None
-            }).execute()
-
-            st.success("User berhasil ditambahkan")
-            st.rerun()
+    st.markdown("### ⚠ Konflik Data")
+    dfk = pd.read_sql("SELECT * FROM conflicts", conn)
+    st.dataframe(dfk)
